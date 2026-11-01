@@ -1,0 +1,509 @@
+<title>Fensterband</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Slit-scan camera for train windows: live or from a clip, developed into one continuous panorama.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Overpass:wght@400;600;700&family=Overpass+Mono:wght@400;600&display=swap">
+<style>
+:root {
+  /* Layout: a workbench. The long panorama stage spans the top like a strip of film;
+     three instruments sit below it like a desk: source monitor, motion graph, develop. */
+  --ground: #e4e6e2;
+  --panel: #f1f2ee;
+  --sunk: #d7dbd6;
+  --stage: #c6ccc9;
+  --ink: #1a1f23;
+  --ink-2: #4a555b;
+  --muted: #687378;
+  --line: #c1c8c4;
+  --line-strong: #98a2a2;
+  --signal: #c48f00;      /* platform-edge yellow, deepened for a light ground */
+  --signal-hi: #f0bf27;
+  --on-signal: #1b1500;
+  --data: #2a6a83;
+  --rec: #c2341c;
+  --scrim: rgba(18, 22, 25, 0.5);
+  --shadow: 0 18px 50px rgba(20, 28, 32, 0.22);
+
+  --f-display: "Big Shoulders Display", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --f-ui: "Overpass", "Helvetica Neue", Arial, sans-serif;
+  --f-mono: "Overpass Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --t-xs: 10.5px; --t-sm: 12px; --t-md: 13.5px; --t-lg: 17px; --t-xl: 30px;
+  --r: 3px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #1d2225; --panel: #252b2f; --sunk: #171b1e; --stage: #121618;
+    --ink: #e2e5e1; --ink-2: #b6bebd; --muted: #85909a; --line: #343c42; --line-strong: #4c575d;
+    --signal: #f0bf27; --signal-hi: #ffd556; --on-signal: #1b1500; --data: #7fb6c9; --rec: #ff6a4e;
+    --scrim: rgba(0, 0, 0, 0.55); --shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #1d2225; --panel: #252b2f; --sunk: #171b1e; --stage: #121618;
+  --ink: #e2e5e1; --ink-2: #b6bebd; --muted: #85909a; --line: #343c42; --line-strong: #4c575d;
+  --signal: #f0bf27; --signal-hi: #ffd556; --on-signal: #1b1500; --data: #7fb6c9; --rec: #ff6a4e;
+  --scrim: rgba(0, 0, 0, 0.55); --shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--ground); color: var(--ink);
+  font: 400 var(--t-md)/1.45 var(--f-ui);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+canvas { display: block; }
+
+/* ---------- shell */
+.app {
+  display: grid;
+  grid-template-rows: auto minmax(200px, 1fr) auto clamp(310px, 42vh, 420px);
+  height: 100%;
+  min-height: 0;
+}
+.bar {
+  display: flex; align-items: center; gap: 18px;
+  padding-block: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.wm {
+  margin: 0; display: flex; align-items: center; gap: 0;
+  font: 800 22px/1 var(--f-display); letter-spacing: 0.06em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.wm i {
+  display: inline-block; width: 3px; height: 26px; margin: 0 4px;
+  background: var(--signal); box-shadow: 0 0 10px color-mix(in srgb, var(--signal) 55%, transparent);
+}
+.wm small {
+  margin-left: 14px; font: 400 var(--t-xs)/1.2 var(--f-mono); letter-spacing: 0.04em; text-transform: none; color: var(--muted);
+}
+.facts { display: flex; gap: 16px; margin-left: auto; font: 400 var(--t-sm)/1 var(--f-mono); color: var(--muted); white-space: nowrap; }
+.facts b { color: var(--ink); font-weight: 600; }
+
+/* ---------- controls */
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r); overflow: hidden; flex-shrink: 0; }
+.seg button {
+  border: 0; background: transparent; padding: 6px 12px; min-height: 30px;
+  font: 600 var(--t-sm)/1 var(--f-ui); letter-spacing: 0.02em; color: var(--ink-2);
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-checked="true"], .seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.seg button:disabled { opacity: 0.35; cursor: default; }
+.seg.modes button { padding: 7px 16px; font-size: var(--t-md); }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 34px; padding: 0 14px; border-radius: var(--r);
+  border: 1px solid var(--line-strong); background: transparent;
+  font: 600 var(--t-sm)/1 var(--f-ui); letter-spacing: 0.02em;
+}
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+.btn.primary:hover { background: var(--signal-hi); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.link { border: 0; background: none; padding: 2px 0; font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.link:hover { color: var(--ink); }
+
+/* ---------- stage */
+.stage { position: relative; min-height: 0; background: var(--stage); overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+.stage canvas.grabbing { cursor: grabbing; }
+.stage-tools {
+  position: absolute; top: 10px; right: max(16px, env(safe-area-inset-right, 0px)); display: flex; gap: 6px; align-items: center;
+}
+.stage-tools button, .follow {
+  border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); border-radius: var(--r);
+  background: color-mix(in srgb, var(--panel) 82%, transparent); backdrop-filter: blur(6px);
+  padding: 5px 9px; font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.06em; text-transform: uppercase;
+}
+.stage-tools button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.zoom-ro { font: 400 var(--t-xs)/1 var(--f-mono); color: var(--ink-2); min-width: 4.5em; text-align: right; padding: 4px 6px; background: color-mix(in srgb, var(--panel) 70%, transparent); border-radius: var(--r); }
+.follow { position: absolute; top: 10px; left: max(16px, env(safe-area-inset-left, 0px)); color: var(--ink); }
+.stage-empty { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; padding: 24px; color: var(--muted); pointer-events: none; }
+.stage-empty .big { font: 600 var(--t-xl)/1.1 var(--f-display); letter-spacing: 0.02em; color: var(--ink-2); margin: 0 0 8px; text-transform: uppercase; }
+.stage-empty p { margin: 0; max-width: 40ch; }
+.tip {
+  position: absolute; pointer-events: none; transform: translate(-50%, 0);
+  font: 400 var(--t-xs)/1.35 var(--f-mono); white-space: nowrap;
+  background: var(--ink); color: var(--panel); padding: 4px 7px; border-radius: var(--r);
+}
+.busy {
+  position: absolute; left: 50%; bottom: 38px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 14px; border-radius: var(--r);
+  background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(8px);
+  box-shadow: var(--shadow); font: 400 var(--t-sm)/1 var(--f-mono); white-space: nowrap; max-width: calc(100% - 32px);
+}
+.busy i { display: block; width: 120px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+.busy b { display: block; height: 100%; width: 0; background: var(--signal); }
+.busy span { overflow: hidden; text-overflow: ellipsis; }
+
+.overview { height: 34px; background: var(--sunk); border-block: 1px solid var(--line); position: relative; touch-action: none; }
+.overview canvas { width: 100%; height: 100%; cursor: pointer; }
+
+/* ---------- deck */
+.deck {
+  display: grid; grid-template-columns: minmax(330px, 1fr) minmax(280px, 1.25fr) minmax(280px, 320px);
+  gap: 1px; background: var(--line); min-height: 0; overflow: hidden;
+}
+.panel { background: var(--panel); padding: 12px 16px 14px; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+.p-develop, .p-source { overflow-y: auto; }
+.p-source .monitor { flex: 1 1 auto; min-height: 140px; aspect-ratio: auto; }
+.p-source { padding-left: max(16px, env(safe-area-inset-left, 0px)); }
+.p-develop { padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.ph { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.ph h2 { margin: 0; font: 700 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink); }
+.ph .unit { font: 400 var(--t-xs)/1 var(--f-mono); color: var(--muted); }
+.ph .ro { margin-left: auto; font: 400 var(--t-xs)/1 var(--f-mono); color: var(--ink-2); white-space: nowrap; }
+.ph .link { margin-left: auto; }
+
+.monitor { position: relative; aspect-ratio: 16 / 9.5; background: var(--sunk); border-radius: var(--r); overflow: hidden; touch-action: none; }
+.monitor canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+/* the videos stay genuinely on screen under the canvas: iOS stops feeding frames to video it considers hidden */
+.monitor video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.monitor canvas { z-index: 1; }
+.mon-note { z-index: 2; }
+.mon-note {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  padding: 18px; text-align: center; background: var(--scrim); color: #f4f5f1;
+}
+.mon-note p { margin: 0; max-width: 42ch; font-size: var(--t-sm); }
+.mon-note strong { font: 700 var(--t-lg)/1.2 var(--f-display); letter-spacing: 0.04em; text-transform: uppercase; }
+.mon-note .row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.mon-note .btn { border-color: rgba(255, 255, 255, 0.5); color: #f4f5f1; }
+.mon-note .btn.primary { color: var(--on-signal); border-color: var(--signal); }
+.monitor.drop::after { content: "Drop to open"; z-index: 3; position: absolute; inset: 8px; border: 2px dashed var(--signal); border-radius: var(--r); display: grid; place-content: center; font: 700 var(--t-lg)/1 var(--f-display); text-transform: uppercase; letter-spacing: 0.06em; color: #fff; background: var(--scrim); }
+
+.scanrow { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.scan {
+  display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 18px 0 14px; border-radius: var(--r);
+  border: 1px solid var(--signal); background: var(--signal); color: var(--on-signal);
+  font: 800 17px/1 var(--f-display); letter-spacing: 0.08em; text-transform: uppercase; flex-shrink: 0;
+}
+.scan:hover { background: var(--signal-hi); }
+.scan .slit-ic { width: 3px; height: 18px; background: currentColor; border-radius: 1px; }
+.scan[data-state="on"] { background: transparent; color: var(--ink); border-color: var(--rec); }
+.scan[data-state="on"] .slit-ic { background: var(--rec); animation: pulse 1s steps(2) infinite; }
+.scan:disabled { opacity: 0.4; cursor: default; }
+@keyframes pulse { 50% { opacity: 0.2; } }
+.scan-hint { font-size: var(--t-sm); color: var(--muted); min-width: 0; line-height: 1.35; }
+.scan-hint b { color: var(--ink); font-weight: 600; }
+
+/* sliders: the thumb is a slit */
+.ctl { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 10px; min-width: 0; }
+.ctl label, .ctl .lbl { font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-2); }
+.ctl output { font: 400 var(--t-sm)/1 var(--f-mono); color: var(--ink); }
+.ctl input[type="range"], .ctl .seg, .ctl .ends, .ctl .wide { grid-column: 1 / -1; }
+.ctl .seg { justify-self: start; max-width: 100%; }
+.controls.two .seg button { padding: 6px 10px; }
+.ctl .ends { display: flex; justify-content: space-between; font: 400 var(--t-xs)/1 var(--f-mono); color: var(--muted); margin-top: -2px; }
+.ctl.off { opacity: 0.45; }
+input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: transparent; margin: 0; cursor: pointer; }
+input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: linear-gradient(to right, var(--ink-2) 0 var(--p, 50%), var(--line-strong) var(--p, 50%)); border-radius: 1px; }
+input[type="range"]::-moz-range-track { height: 2px; background: var(--line-strong); }
+input[type="range"]::-moz-range-progress { height: 2px; background: var(--ink-2); }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 5px; height: 18px; margin-top: -8px; background: var(--ink); border-radius: 1px; border: 0; }
+input[type="range"]::-moz-range-thumb { width: 5px; height: 18px; background: var(--ink); border-radius: 1px; border: 0; }
+input[type="range"]:focus-visible { outline: none; }
+input[type="range"]:focus-visible::-webkit-slider-thumb { background: var(--signal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 35%, transparent); }
+input[type="range"]:focus-visible::-moz-range-thumb { background: var(--signal); }
+input[type="range"]:disabled { cursor: default; }
+
+.controls { display: grid; gap: 11px; }
+.controls.two { grid-template-columns: 1fr 1fr; gap: 10px 18px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--signal); border-radius: var(--r);
+  padding: 4px 8px; font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.04em; background: color-mix(in srgb, var(--signal) 14%, transparent);
+}
+.chip button { border: 0; background: none; padding: 0; font: 700 var(--t-xs)/1 var(--f-ui); text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-2); }
+select { border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--panel); padding: 6px 8px; font-size: var(--t-sm); max-width: 100%; min-width: 0; }
+.toggle { display: flex; align-items: center; gap: 8px; font-size: var(--t-sm); color: var(--ink-2); cursor: pointer; }
+.ctl label.toggle { font: 400 var(--t-sm)/1.25 var(--f-ui); letter-spacing: 0; text-transform: none; color: var(--ink-2); }
+.toggle input { accent-color: var(--signal); width: 16px; height: 16px; }
+.note { margin: 0; font-size: var(--t-sm); color: var(--muted); line-height: 1.45; }
+.note b { color: var(--ink-2); font-weight: 600; }
+.fname { font: 400 var(--t-sm)/1.3 var(--f-mono); color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.row { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+
+.graph-wrap { position: relative; flex: 1 1 auto; min-height: 120px; }
+.graph-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 400 var(--t-xs)/1.2 var(--f-mono); color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px; background: var(--ink); }
+.legend i.dots { height: 4px; background: radial-gradient(circle, var(--data) 1.2px, transparent 1.6px) 0 0 / 4px 4px; }
+.legend i.gap { width: 3px; height: 8px; background: var(--rec); }
+
+/* ---------- export sheet */
+.scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 20; }
+.sheet {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(380px, 100%); z-index: 21;
+  background: var(--panel); box-shadow: var(--shadow); display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.sheet header { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
+.sheet header h2 { margin: 0; font: 800 22px/1 var(--f-display); letter-spacing: 0.06em; text-transform: uppercase; }
+.sheet .x { border: 0; background: none; font: 400 26px/1 var(--f-ui); color: var(--ink-2); padding: 0 4px; }
+.sheet .body { overflow: auto; padding: 4px 18px 24px; display: grid; gap: 0; }
+.sheet section { display: grid; gap: 12px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.sheet section:last-child { border-bottom: 0; }
+.sheet h3 { margin: 0; font: 700 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.12em; text-transform: uppercase; }
+.sheet .field { display: grid; grid-template-columns: 76px 1fr; align-items: center; gap: 10px; }
+.sheet .field > span { font: 600 var(--t-xs)/1 var(--f-ui); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.sheet .field .seg { justify-self: start; }
+.sheet .dim { margin: 0; font: 400 var(--t-sm)/1.3 var(--f-mono); color: var(--ink-2); }
+.preview { width: 100%; aspect-ratio: 16 / 9; background: #0e1012; border-radius: var(--r); }
+.sheet input[type="number"] { width: 72px; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--panel); padding: 5px 7px; font: 400 var(--t-sm)/1 var(--f-mono); }
+.prog { display: grid; gap: 8px; }
+.ready { display: grid; gap: 10px; padding: 14px; margin-top: 12px; border: 1px solid var(--signal); border-radius: var(--r); background: color-mix(in srgb, var(--signal) 10%, transparent); font: 400 var(--t-sm)/1.35 var(--f-mono); color: var(--ink-2); }
+.ready b { color: var(--ink); font-weight: 600; word-break: break-all; }
+.prog i { display: block; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.prog b { display: block; height: 100%; width: 0; background: var(--signal); transition: width 0.15s linear; }
+.prog .row { justify-content: space-between; font: 400 var(--t-sm)/1 var(--f-mono); color: var(--ink-2); }
+
+.toast {
+  position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translate(-50%, 20px); z-index: 30;
+  background: var(--ink); color: var(--panel); padding: 9px 14px; border-radius: var(--r);
+  font-size: var(--t-sm); opacity: 0; pointer-events: none; transition: opacity 0.2s, transform 0.2s; max-width: min(520px, calc(100% - 32px));
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.err { background: var(--rec); color: #fff; }
+
+/* ---------- smaller screens: the page scrolls, instruments stack */
+@media (max-width: 1099px) {
+  html, body { height: auto; }
+  .app { height: auto; grid-template-rows: auto clamp(240px, 42vh, 460px) auto auto; }
+  .deck { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); overflow: visible; }
+  .p-develop { overflow: visible; }
+  .p-source .monitor { flex: none; aspect-ratio: 16 / 9.5; }
+  .p-motion { grid-column: 1 / -1; order: 3; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .graph-wrap { flex: none; height: 200px; }
+  .p-develop { padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+}
+@media (max-width: 759px) {
+  .bar { flex-wrap: wrap; gap: 10px 14px; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; background: var(--ground); }
+  body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 11; background: var(--ground); }
+  .wm small { display: none; }
+  .facts { order: 4; width: 100%; margin-left: 0; gap: 14px; }
+  .seg.modes { margin-left: auto; }
+  #btnExport { order: 3; }
+  .app { grid-template-rows: auto clamp(220px, 34vh, 340px) auto auto; }
+  .deck { grid-template-columns: minmax(0, 1fr); }
+  .p-source { order: 1; padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .p-motion { order: 3; }
+  .p-develop { order: 2; padding-left: max(16px, env(safe-area-inset-left, 0px)); }
+  .graph-wrap { height: 170px; }
+  .controls.two:not(.keep) { grid-template-columns: 1fr; }
+  .sheet { top: auto; width: 100%; max-height: 88vh; border-radius: 10px 10px 0 0; padding-right: 0; }
+  .sheet .body { padding-left: max(18px, env(safe-area-inset-left, 0px)); padding-right: max(18px, env(safe-area-inset-right, 0px)); }
+}
+@media (pointer: coarse) {
+  input[type="range"] { height: 34px; }
+  input[type="range"]::-webkit-slider-thumb { width: 8px; height: 26px; margin-top: -12px; }
+  input[type="range"]::-moz-range-thumb { width: 8px; height: 26px; }
+}
+.fab {
+  position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 15;
+  box-shadow: var(--shadow);
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast { transition: none; }
+  .scan[data-state="on"] .slit-ic { animation: none; }
+}
+</style>
+
+<div class="app" id="app">
+  <header class="bar">
+    <h1 class="wm" aria-label="Fensterband"><span>Fenster</span><i aria-hidden="true"></i><span>band</span><small>slit-scan camera</small></h1>
+    <div class="seg modes" role="radiogroup" aria-label="Source">
+      <button type="button" role="radio" data-mode="live" aria-checked="false">Live</button>
+      <button type="button" role="radio" data-mode="clip" aria-checked="false">Clip</button>
+      <button type="button" role="radio" data-mode="demo" aria-checked="true">Demo</button>
+    </div>
+    <div class="facts" aria-live="off"><span><b id="fLen">0</b> px</span><span><b id="fDur">0:00.0</b></span><span><b id="fFrames">0</b> frames</span></div>
+    <button type="button" class="btn primary" id="btnExport" disabled>Export</button>
+  </header>
+
+  <section class="stage" id="stage" aria-label="Panorama">
+    <canvas id="pano" aria-label="Developed panorama. Drag to move, scroll to pan, pinch or Ctrl+scroll to zoom."></canvas>
+    <div class="stage-empty" id="stageEmpty" hidden>
+      <p class="big">Nothing scanned yet</p>
+      <p>Point the camera out of a train window and press Scan, or open a clip you filmed.</p>
+    </div>
+    <div class="stage-tools">
+      <span class="zoom-ro" id="zoomRo">fit</span>
+      <button type="button" data-zoom="fit" title="Fit height (F)">Fit</button>
+      <button type="button" data-zoom="1" title="Actual pixels (1)">1:1</button>
+      <button type="button" data-zoom="all" title="Whole strip (A)">All</button>
+    </div>
+    <button type="button" class="follow" id="btnFollow" hidden>Follow scan</button>
+    <div class="tip" id="tip" hidden></div>
+    <div class="busy" id="busy" hidden><span id="busyText">Scanning</span><i><b id="busyBar"></b></i><button type="button" class="link" id="busyCancel">Stop</button></div>
+  </section>
+  <div class="overview"><canvas id="overview" aria-label="Overview of the whole strip"></canvas></div>
+
+  <section class="deck">
+    <div class="panel p-source">
+      <div class="ph"><h2>Source</h2><span class="unit" id="srcName">Demo ride</span><span class="ro" id="srcRo"></span></div>
+      <div class="monitor" id="monitor">
+        <video id="vidCam" muted playsinline autoplay></video>
+        <video id="vidClip" muted playsinline preload="auto"></video>
+        <canvas id="mon" aria-label="Source monitor. Drag the yellow line to move the slit, drag the dimmed edges to crop, tap a depth bar to lock it."></canvas>
+        <div class="mon-note" id="monNote" hidden></div>
+      </div>
+      <div class="scanrow">
+        <button type="button" class="scan" id="btnScan"><i class="slit-ic" aria-hidden="true"></i><span id="scanLabel">Scan</span></button>
+        <div class="scan-hint" id="scanHint"></div>
+      </div>
+      <div class="controls two" id="sourceCtl">
+        <div class="ctl">
+          <label for="cLevel">Level</label><output id="oLevel" for="cLevel">0.0°</output>
+          <input type="range" id="cLevel" min="-8" max="8" step="0.1" value="0">
+        </div>
+        <div class="ctl">
+          <span class="lbl">Output height</span><output id="oOutH">1080 px</output>
+          <div class="seg" id="segOutH" role="radiogroup" aria-label="Output height">
+            <button type="button" role="radio" data-v="720">720</button><button type="button" role="radio" data-v="1080">1080</button><button type="button" role="radio" data-v="1440">1440</button><button type="button" role="radio" data-v="2160">2160</button>
+          </div>
+        </div>
+        <div class="ctl wide" data-for="live">
+          <label for="cCam">Camera</label><span></span>
+          <select id="cCam" class="wide"><option value="">Rear camera</option></select>
+        </div>
+        <div class="ctl wide" data-for="live" style="grid-template-columns: 1fr 1fr;">
+          <label class="toggle"><input type="checkbox" id="cGps"> Log GPS speed</label>
+          <label class="toggle"><input type="checkbox" id="cKeep" checked> Keep the video</label>
+        </div>
+        <div class="ctl wide" data-for="clip">
+          <span class="lbl">Clip</span><output id="oClipPos">0:00.0</output>
+          <input type="range" id="cClipPos" min="0" max="1" step="0.001" value="0" aria-label="Clip position">
+          <div class="row wide"><button type="button" class="btn" id="btnOpen">Open clip…</button><button type="button" class="btn" id="btnRecord" hidden>Record with camera</button><span class="fname" id="clipName">No clip open</span></div>
+        </div>
+        <p class="note wide" data-for="demo" style="grid-column: 1 / -1;">A drawn ride with real distances, from hills at 1 km to the platform at 4 m, so every depth moves at its own speed.</p>
+      </div>
+    </div>
+
+    <div class="panel p-motion">
+      <div class="ph"><h2>Motion</h2><span class="unit">strip px per frame · log</span><span class="ro" id="motionRo"></span></div>
+      <div class="graph-wrap"><canvas id="graph" aria-label="Motion graph. Drag the end markers to trim."></canvas></div>
+      <div class="legend" aria-hidden="true"><span><i></i>strip width used</span><span><i class="dots"></i>six depth bands</span><span><i class="gap"></i>no lock</span><span>drag the end bars to trim</span></div>
+    </div>
+
+    <div class="panel p-develop">
+      <div class="ph"><h2>Develop</h2><button type="button" class="link" id="btnReset">Reset</button></div>
+      <div class="controls">
+        <div class="ctl" id="ctlDepth">
+          <label for="cDepth">Depth</label><output id="oDepth">mid</output>
+          <input type="range" id="cDepth" min="0" max="1" step="0.01" value="0.5">
+          <div class="ends"><span>far</span><span>true proportions at this distance</span><span>near</span></div>
+          <div class="wide" id="lockChip" hidden><span class="chip"><span id="lockText">Locked to band 3</span><button type="button" id="btnUnlock">Unlock</button></span></div>
+        </div>
+        <div class="ctl">
+          <span class="lbl">Speed from</span><span></span>
+          <div class="seg" id="segSource" role="radiogroup" aria-label="Speed source">
+            <button type="button" role="radio" data-v="motion" title="Measure speed from the image">Image</button><button type="button" role="radio" data-v="fixed" title="Fixed strip width per frame (time-based, smears when the train stops)">Fixed</button><button type="button" role="radio" data-v="gps" title="GPS speed, calibrated against the image">GPS</button>
+          </div>
+        </div>
+        <div class="ctl" id="ctlFixed" hidden>
+          <label for="cFixed">Strip width</label><output id="oFixed">12 px</output>
+          <input type="range" id="cFixed" min="1" max="80" step="1" value="12">
+        </div>
+        <div class="controls two">
+          <div class="ctl">
+            <label for="cStretch">Stretch</label><output id="oStretch">1.00×</output>
+            <input type="range" id="cStretch" min="-2" max="2" step="0.01" value="0">
+          </div>
+          <div class="ctl">
+            <label for="cSmooth">Smoothing</label><output id="oSmooth">12 f</output>
+            <input type="range" id="cSmooth" min="0" max="40" step="1" value="12">
+          </div>
+          <div class="ctl">
+            <label for="cStab">Steady</label><output id="oStab">85 %</output>
+            <input type="range" id="cStab" min="0" max="1" step="0.01" value="0.85">
+          </div>
+          <div class="ctl">
+            <label for="cSeams">Seam blend</label><output id="oSeams">50 %</output>
+            <input type="range" id="cSeams" min="0" max="1" step="0.01" value="0.5">
+            <div class="ends"><span>hard cut</span><span>crossfade</span></div>
+          </div>
+        </div>
+        <div class="controls two keep">
+          <div class="ctl">
+            <span class="lbl">Other depths</span><span></span>
+            <div class="seg" id="segLayers" role="radiogroup" aria-label="How layers at other depths are drawn">
+              <button type="button" role="radio" data-v="smooth" title="Each band moves at its own measured speed: far layers stretch, near layers compress, nothing repeats">Smooth</button><button type="button" role="radio" data-v="strips" title="Classic slit-scan strips: layers at other depths repeat or break up">Strips</button>
+            </div>
+          </div>
+          <div class="ctl">
+            <span class="lbl">Scenery moves</span><span></span>
+            <div class="seg" id="segDir" role="radiogroup" aria-label="Direction the scenery moves">
+              <button type="button" role="radio" data-v="auto" title="Detect from the motion">Auto</button><button type="button" role="radio" data-v="left" title="Scenery moves to the left in the frame" aria-label="Left">←</button><button type="button" role="radio" data-v="right" title="Scenery moves to the right in the frame" aria-label="Right">→</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" hidden>
+    <header><h2 id="sheetTitle">Export</h2><button type="button" class="x" id="sheetClose" aria-label="Close export">×</button></header>
+    <div class="body">
+      <section>
+        <h3>Image</h3>
+        <div class="field"><span>Size</span>
+          <div class="seg" id="exScale" role="radiogroup" aria-label="Image size"><button type="button" role="radio" data-v="1">100 %</button><button type="button" role="radio" data-v="0.5">50 %</button><button type="button" role="radio" data-v="0.25">25 %</button></div>
+        </div>
+        <p class="dim" id="exImgInfo">—</p>
+        <button type="button" class="btn primary" id="btnPng">Save PNG</button>
+      </section>
+      <section>
+        <h3>Scan video</h3>
+        <canvas class="preview" id="exPreview" aria-label="Preview of the video style"></canvas>
+        <div class="field"><span>Style</span>
+          <div class="seg" id="exStyle" role="radiogroup" aria-label="Video style"><button type="button" role="radio" data-v="sweep" title="The scan line crosses the frame, then the strip scrolls">Sweep</button><button type="button" role="radio" data-v="scroll" title="The scan line stays at the edge, the strip streams past">Scroll</button><button type="button" role="radio" data-v="pan" title="A camera move across the finished strip">Pan</button></div>
+        </div>
+        <div class="field"><span>Frame</span>
+          <div class="seg" id="exFrame" role="radiogroup" aria-label="Frame shape"><button type="button" role="radio" data-v="1920x1080">16:9</button><button type="button" role="radio" data-v="1080x1080">1:1</button><button type="button" role="radio" data-v="1080x1350">4:5</button><button type="button" role="radio" data-v="1080x1920">9:16</button></div>
+        </div>
+        <div class="field"><span>Pace</span>
+          <div class="row"><div class="seg" id="exPace" role="radiogroup" aria-label="Pace"><button type="button" role="radio" data-v="real" title="Follows the train: stops when the train stops">Real time</button><button type="button" role="radio" data-v="even" title="Constant speed over the chosen length">Even</button></div>
+          <input type="number" id="exLen" min="2" max="600" step="1" value="20" aria-label="Length in seconds"> <span class="dim" id="exLenUnit">s</span></div>
+        </div>
+        <div class="field"><span>Rate</span>
+          <div class="row"><div class="seg" id="exFps" role="radiogroup" aria-label="Frame rate"><button type="button" role="radio" data-v="30">30 fps</button><button type="button" role="radio" data-v="60">60 fps</button></div>
+          <label class="toggle"><input type="checkbox" id="exLine" checked> Scan line</label></div>
+        </div>
+        <p class="dim" id="exVidInfo">—</p>
+        <button type="button" class="btn primary" id="btnVid">Save video</button>
+      </section>
+      <section>
+        <h3>Data</h3>
+        <div class="row"><button type="button" class="btn" id="btnCsv">Motion log (.csv)</button><button type="button" class="btn" id="btnClip" hidden>Camera recording</button></div>
+        <p class="note">The motion log lists every frame with its time, strip width, the six band speeds and GPS speed when logged.</p>
+      </section>
+      <div class="ready" id="exReady" hidden>
+        <span>Ready: <b id="exReadyName"></b></span>
+        <button type="button" class="btn primary" id="exReadyBtn">Save…</button>
+      </div>
+      <div class="prog" id="exProg" hidden>
+        <div class="row"><span id="exProgText">Rendering</span><button type="button" class="link" id="exCancel">Cancel</button></div>
+        <i><b id="exProgBar"></b></i>
+      </div>
+    </div>
+  </aside>
+  <button type="button" class="scan fab" id="btnFab" hidden><i class="slit-ic" aria-hidden="true"></i><span id="fabLabel">Scan</span></button>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="fileIn" accept="video/*,.mp4,.mov,.webm,.m4v" hidden>
+  <input type="file" id="camIn" accept="video/*" capture="environment" hidden>
+</div>
