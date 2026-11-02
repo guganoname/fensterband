@@ -207,7 +207,9 @@ canvas { display: block; }
 .ctl input[type="range"], .ctl .seg, .ctl .ends, .ctl .wide { grid-column: 1 / -1; }
 .ctl .seg { justify-self: start; max-width: 100%; }
 .controls.two .seg button { padding: 6px 10px; }
-.ctl .ends { display: flex; justify-content: space-between; font: 400 var(--t-xs)/1 var(--f-mono); color: var(--muted); margin-top: -2px; }
+.ctl .ends { display: flex; justify-content: space-between; align-items: baseline; font: 400 var(--t-xs)/1 var(--f-mono); color: var(--muted); margin-top: -2px; }
+.ctl .ends .link { font-family: var(--f-ui); }
+.ctl .ends .link[aria-pressed="true"] { color: var(--signal); }
 .ctl.off { opacity: 0.45; }
 input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: transparent; margin: 0; cursor: pointer; }
 input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: linear-gradient(to right, var(--ink-2) 0 var(--p, 50%), var(--line-strong) var(--p, 50%)); border-radius: 1px; }
@@ -435,6 +437,17 @@ select { border: 1px solid var(--line-strong); border-radius: var(--r); backgrou
             <label for="cSeams">Seam blend</label><output id="oSeams">50 %</output>
             <input type="range" id="cSeams" min="0" max="1" step="0.01" value="0.5">
             <div class="ends"><span>hard cut</span><span>crossfade</span></div>
+          </div>
+          <div class="ctl">
+            <label for="cSkew">Skew</label><output id="oSkew">auto</output>
+            <input type="range" id="cSkew" min="-1.2" max="1.2" step="0.01" value="0" title="Phone cameras read the picture row by row, which tilts vertical edges. Auto measures it after each scan.">
+            <div class="ends"><span><button type="button" class="link" id="btnSkewAuto">Auto</button></span><span>upright edges</span></div>
+          </div>
+          <div class="ctl">
+            <span class="lbl">Exposure</span><span></span>
+            <div class="seg" id="segExposure" role="radiogroup" aria-label="Exposure">
+              <button type="button" role="radio" data-v="even" title="Removes brightness and colour jumps from the camera's auto exposure">Even</button><button type="button" role="radio" data-v="shot" title="Brightness exactly as the camera recorded it">As shot</button>
+            </div>
           </div>
         </div>
         <div class="controls two keep">

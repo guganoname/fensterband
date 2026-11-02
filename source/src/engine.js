@@ -218,7 +218,7 @@ class Analyzer {
    and poles from stuttering near a stop) and the vertical shake.
    Returns { dx: Float32Array(NB) in output px (NaN where not refined),
              dy: median vertical shift in output px or NaN }. */
-function stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, xstep, shift, dy) {
+function stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, xstep, shift, dy, k = 1) {
   const sh0 = Math.floor(shift), fsh = shift - sh0;
   let s = 0, n = 0;
   for (let y = r0; y < r1; y += 2) {
@@ -229,11 +229,33 @@ function stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, xstep, shift, dy) {
       const c4 = ci + x * 4, p4 = pi + (x + sh0) * 4;
       const a = cd[c4] + 2 * cd[c4 + 1] + cd[c4 + 2];
       const v0 = pd[p4] + 2 * pd[p4 + 1] + pd[p4 + 2], v1 = pd[p4 + 4] + 2 * pd[p4 + 5] + pd[p4 + 6];
-      const d = a - (v0 + (v1 - v0) * fsh);
+      const d = a - k * (v0 + (v1 - v0) * fsh);
       s += d < 0 ? -d : d; n++;
     }
   }
   return n ? s / n : Infinity;
+}
+
+/* mean RGB of matching patches (cur, and prev shifted by the measured motion),
+   ignoring pixels clipped in either; for exposure tracking */
+function patchMeans(pd, pw, cd, cw, H, r0, r1, xs0, xs1, shift, dy, out) {
+  const sh = Math.round(shift);
+  let cr = 0, cg = 0, cb = 0, pr = 0, pg = 0, pb = 0, n = 0;
+  for (let y = r0; y < r1; y += 2) {
+    const py = y - dy;
+    if (py < 0 || py >= H) continue;
+    const ci = y * cw * 4, pi = py * pw * 4;
+    for (let x = xs0; x < xs1; x += 2) {
+      const c4 = ci + x * 4, p4 = pi + (x + sh) * 4;
+      const a0 = cd[c4], a1 = cd[c4 + 1], a2 = cd[c4 + 2], b0 = pd[p4], b1 = pd[p4 + 1], b2 = pd[p4 + 2];
+      if (a0 > 248 || a1 > 248 || a2 > 248 || b0 > 248 || b1 > 248 || b2 > 248) continue;
+      if (a0 + a1 + a2 < 24 || b0 + b1 + b2 < 24) continue;
+      cr += a0; cg += a1; cb += a2; pr += b0; pg += b1; pb += b2; n++;
+    }
+  }
+  if (n < 40) return false;
+  out[0] = Math.log(cr / pr); out[1] = Math.log(cg / pg); out[2] = Math.log(cb / pb);
+  return true;
 }
 
 function refineMotion(prev, cur, bands, OH, M, kOut) {
@@ -241,6 +263,7 @@ function refineMotion(prev, cur, bands, OH, M, kOut) {
   const pd = prev.data, cd = cur.data;
   const dxOut = new Float32Array(NB).fill(NaN);
   const dys = [];
+  const gR = [], gG = [], gB = [], gm = new Float64Array(3);
   const cx5 = new Float64Array(5), cy9 = new Float64Array(9);
   const base = prev.cx - cur.cx;
   for (let b = 0; b < NB; b++) {
@@ -254,10 +277,13 @@ function refineMotion(prev, cur, bands, OH, M, kOut) {
     const hw = Math.min(24, ccx - 1, cw - ccx - 1, ccx + lo - 1, pw - (ccx + hi) - 2);
     if (hw < 4) continue;
     const xs0 = ccx - hw, xs1 = ccx + hw;
+    // brightness ratio at the coarse match, so a change in exposure doesn't spoil the matching
+    let kG = 1;
+    if (patchMeans(pd, pw, cd, cw, H, r0, r1, xs0, xs1, base - dxi, dyc, gm)) kG = clamp(Math.exp((gm[0] + 2 * gm[1] + gm[2]) / 4), 0.7, 1.4);
     // horizontal
     let best = Infinity, bi = 0, mean = 0;
     for (let k = 0; k < 5; k++) {
-      cx5[k] = stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, 1, base - (dxi - 2 + k), dyc);
+      cx5[k] = stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, 1, base - (dxi - 2 + k), dyc, kG);
       mean += cx5[k];
       if (cx5[k] < best) { best = cx5[k]; bi = k; }
     }
@@ -270,19 +296,41 @@ function refineMotion(prev, cur, bands, OH, M, kOut) {
     // vertical, at the refined horizontal motion
     best = Infinity; bi = 0; mean = 0;
     for (let k = 0; k < 9; k++) {
-      cy9[k] = stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, 2, base - dx, dyc - 4 + k);
+      cy9[k] = stripSad(pd, pw, cd, cw, H, r0, r1, xs0, xs1, 2, base - dx, dyc - 4 + k, kG);
       mean += cy9[k];
       if (cy9[k] < best) { best = cy9[k]; bi = k; }
     }
     mean /= 9;
-    if (best < 0.7 * mean && bi > 0 && bi < 8) dys.push(dyc - 4 + bi + vfit(cy9[bi - 1], best, cy9[bi + 1]));
+    let dyb = dyc;
+    if (best < 0.7 * mean && bi > 0 && bi < 8) { dyb = dyc - 4 + bi; dys.push(dyb + vfit(cy9[bi - 1], best, cy9[bi + 1])); }
+    // exposure change between the two frames, on matched content only
+    if (patchMeans(pd, pw, cd, cw, H, r0, r1, xs0, xs1, base - dx, dyb, gm)) {
+      gR.push(gm[0]); gG.push(gm[1]); gB.push(gm[2]);
+    }
+  }
+  // featureless bands (sky, haze) can't be matched for motion but are the
+  // most reliable exposure reference: any alignment compares the same tone
+  for (let b = 0; b < NB; b++) {
+    if (bands[b * 3 + 2] >= CONF_MIN) continue;
+    const r0 = M + Math.round(b * OH / NB) + 6, r1 = M + Math.round((b + 1) * OH / NB) - 6;
+    const ccx = Math.round(cur.cx), sh = Math.round(base - bands[b * 3] * kOut);
+    const hw = Math.min(24, ccx - 1, cw - ccx - 1, ccx + sh - 1, pw - (ccx + sh) - 2);
+    if (hw < 4) continue;
+    if (patchMeans(pd, pw, cd, cw, H, r0, r1, ccx - hw, ccx + hw, sh, 0, gm)) { gR.push(gm[0]); gG.push(gm[1]); gB.push(gm[2]); }
+  }
+  let dg = null;
+  if (gR.length >= 2) {
+    const med = (a) => { a.sort((x, y) => x - y); const m = a.length >> 1; return a.length & 1 ? a[m] : 0.5 * (a[m - 1] + a[m]); };
+    dg = new Float32Array([med(gR), med(gG), med(gB)]);
+    // auto exposure moves a few percent per frame at most; larger jumps are content, not camera
+    if (Math.max(Math.abs(dg[0]), Math.abs(dg[1]), Math.abs(dg[2])) > 0.12) dg = null;
   }
   let dy = NaN;
   if (dys.length) {
     dys.sort((a, c) => a - c);
     dy = dys.length & 1 ? dys[dys.length >> 1] : 0.5 * (dys[dys.length / 2 - 1] + dys[dys.length / 2]);
   }
-  return { dx: dxOut, dy };
+  return { dx: dxOut, dy, dg };
 }
 
 /* ------------------------------------------------------------ statistics */
@@ -424,6 +472,8 @@ function computeTrack(sess, dev, opts) {
     f: new Float32Array(n), raw: new Float32Array(n), valid: new Uint8Array(n),
     sigma: 1, fi: 0, fo: Math.max(0, n - 1), L: 0, gpsRatio: NaN,
     bandU: new Float32Array(n * NB), OH: g.OH,
+    cropFrac: g.cropBot != null ? g.cropBot - g.cropTop : 1,
+    gain: new Float32Array(n * 3).fill(1),
   };
   if (n === 0) return T;
 
@@ -609,6 +659,23 @@ function computeTrack(sess, dev, opts) {
     T.fi = clamp(Math.round(dev.trimIn * (n - 1)), 0, n - 1);
     T.fo = clamp(Math.round(dev.trimOut * (n - 1)), T.fi, n - 1);
   }
+  // exposure / white balance: cumulative log change measured on matched content;
+  // remove its fast part (auto-exposure pumping, steps) and keep slow drift
+  const Gc = new Float32Array(n), Gs = new Float32Array(n);
+  const dgc = new Float32Array(n);
+  for (let c = 0; c < 3; c++) {
+    // frames without a measurement take the rate of their neighbours
+    for (let t = 0; t < n; t++) { const d = F[t].dg; dgc[t] = d && Number.isFinite(d[c]) ? d[c] : NaN; }
+    if (n > 1) dgc[n - 1] = Number.isFinite(dgc[n - 1]) ? dgc[n - 1] : 0;
+    fillGaps(dgc, n, causal);
+    Gc[0] = 0;
+    for (let t = 1; t < n; t++) Gc[t] = Gc[t - 1] + dgc[t - 1];
+    if (causal) {
+      let e = 0;
+      for (let t = 0; t < n; t++) { e += (Gc[t] - e) / 90; Gs[t] = e; }
+    } else gaussSmooth(Gc, n, 90, Gs);
+    for (let t = 0; t < n; t++) T.gain[t * 3 + c] = clamp(Math.exp(Gs[t] - Gc[t]), 0.6, 1.7);
+  }
   T.L = P[T.fo] - P[T.fi];
   return T;
 }
@@ -628,7 +695,8 @@ function framesForCols(track, dev, c0, c1, sc) {
   const g = sc * dev.stretch, P0 = track.P[track.fi];
   const ta = findFrame(track.P, track.fi, track.fo, P0 + c0 / g);
   const tb = Math.min(track.fo, findFrame(track.P, track.fi, track.fo, P0 + c1 / g) + 1);
-  return [ta, tb];
+  const ext = Math.ceil(Math.abs(dev.skew || 0) * (track.cropFrac || 1) * 0.5) + 1;
+  return [Math.max(track.fi, ta - ext), Math.min(track.fo, tb + ext)];
 }
 
 /* --------------------------------------------------------------- render
@@ -637,46 +705,54 @@ function framesForCols(track, dev, c0, c1, sc) {
    getStrip(t) -> {data, w, h, cx, M, sx, sy} or null. Each output column
    blends the two frames whose slit positions bracket it. */
 
-let accBuf = new Float32Array(4096 * 3);
-let rowB = new Int8Array(4096), rowF = new Float32Array(4096);
+let accBuf = new Float32Array(4096 * 3), wBuf = new Float32Array(4096);
+let rowB = new Int8Array(4096), rowF = new Float32Array(4096), rowS = new Float32Array(4096);
 
 /* Two ways to sample the frames around each output column:
    'smooth': every row moves with its own band's measured speed, as if the
    slit were one pixel wide and the camera ran at an infinite frame rate.
    Far layers stretch, near layers compress, nothing repeats.
    'strips': classic slit-scan. The whole column uses the chosen depth's
-   speed, so layers at other depths repeat or break up. */
+   speed, so layers at other depths repeat or break up.
+   Rolling shutter: phone sensors read rows one after another, so row y of a
+   frame shows the world a little later than row 0. dev.skew is that delay
+   across the full frame height, in frames; each row is sampled at its own
+   time so vertical edges stand upright again. */
 function renderCols(track, dev, getStrip, o) {
   const { c0, c1, r0, r1, sc, buf, bw, xMap } = o;
   const by = o.by || 0;
   const fi = track.fi, fo = track.fo;
   if (fo <= fi || c1 <= c0) return 0;
   const g = sc * dev.stretch;
-  const P = track.P, u = track.u, corr = track.corr;
+  const P = track.P, u = track.u;
   const P0 = P[fi], Pend = P[fo];
-  const sigma = track.sigma;
   const soft = clamp(dev.seams, 0, 1);
   const nsub = g < 1 ? Math.min(8, Math.ceil(1 / g - 1e-6)) : 1;
   const rows = r1 - r0;
-  if (accBuf.length < rows * 3) accBuf = new Float32Array(rows * 3);
-  if (rowB.length < rows) { rowB = new Int8Array(rows); rowF = new Float32Array(rows); }
-  const acc = accBuf;
+  if (accBuf.length < rows * 3) { accBuf = new Float32Array(rows * 3); wBuf = new Float32Array(rows); }
+  if (rowB.length < rows) { rowB = new Int8Array(rows); rowF = new Float32Array(rows); rowS = new Float32Array(rows); }
+  const acc = accBuf, wacc = wBuf;
   const bu = dev.layers !== 'strips' && track.bandU ? track.bandU : null;
-  if (bu) {
-    // row -> pair of band centres to interpolate between
-    const OH = track.OH, bh = OH / NB;
-    for (let i = 0; i < rows; i++) {
-      const y = (r0 + i + 0.5) / sc;
-      const f = clamp(y / bh - 0.5, 0, NB - 1);
+  const OH = track.OH || rows / sc;
+  const rho = (dev.skew || 0) * (track.cropFrac || 1);
+  let sMin = 0, sMax = 0;
+  for (let i = 0; i < rows; i++) {
+    const y = (r0 + i + 0.5) / sc;
+    rowS[i] = rho * (y / OH - 0.5);
+    if (rowS[i] < sMin) sMin = rowS[i];
+    if (rowS[i] > sMax) sMax = rowS[i];
+    if (bu) {
+      const f = clamp(y / (OH / NB) - 0.5, 0, NB - 1);
       const lo = Math.min(NB - 2, Math.floor(f));
       rowB[i] = lo; rowF[i] = f - lo;
     }
   }
+  const ctx = { track, gain: dev.exposure === 'shot' ? null : track.gain, soft, bu, rows, r0, sc, acc, wacc };
   let t = findFrame(P, fi, fo, P0 + c0 / g);
   let written = 0;
   for (let cc = c0; cc < c1; cc++) {
     for (let i = 0, n3 = rows * 3; i < n3; i++) acc[i] = 0;
-    let wsum = 0;
+    for (let i = 0; i < rows; i++) wacc[i] = 0;
     for (let j = 0; j < nsub; j++) {
       const p = P0 + (cc + (j + 0.5) / nsub) / g;
       if (p >= Pend) break;
@@ -684,49 +760,61 @@ function renderCols(track, dev, getStrip, o) {
       const ut = u[t];
       if (!(ut > 0)) continue;
       const a = (p - P[t]) / ut;
-      const wB = soft < 0.01 ? (a < 0.5 ? 0 : 1) : clamp((a - 0.5) / soft + 0.5, 0, 1);
-      const wA = 1 - wB;
-      const bo = t * NB;
-      if (wA > 0 && sampleInto(acc, getStrip(t), sigma * a, bu, bo, ut, corr[t], wA, rows, r0, sc)) wsum += wA;
-      if (wB > 0 && sampleInto(acc, getStrip(t + 1), -sigma * (1 - a), bu, bo, ut, corr[t + 1], wB, rows, r0, sc)) wsum += wB;
+      const jA = Math.floor(a - sMax), jB = Math.floor(a - sMin) + 1;
+      for (let jj = jA; jj <= jB; jj++) {
+        const f = t + jj;
+        if (f < fi || f > fo) continue;
+        const s = getStrip(f);
+        if (s && s.data) sampleFrame(ctx, s, f, jj, a, t * NB, ut);
+      }
     }
     const x = xMap(cc);
-    if (wsum <= 0) continue;
-    const inv = 1 / wsum;
+    let any = false;
     for (let i = 0; i < rows; i++) {
+      const ws = wacc[i];
+      if (ws <= 0) continue;
+      const inv = 1 / ws;
       const di = ((by + i) * bw + x) * 4;
       buf[di] = acc[i * 3] * inv;
       buf[di + 1] = acc[i * 3 + 1] * inv;
       buf[di + 2] = acc[i * 3 + 2] * inv;
       buf[di + 3] = 255;
+      any = true;
     }
-    written++;
+    if (any) written++;
   }
   return written;
 }
 
-/* adds one frame's contribution for a column: horizontal offset from the
-   slit is k * speed(row), speed from the bands (bu) or constant ut */
-function sampleInto(acc, s, k, bu, bo, ut, corrT, w, rows, r0, sc) {
-  if (!s || !s.data) return false;
+/* one frame's contribution to a column: row i wants the moment
+   delta = a - rowS[i] (frames after frame t); this frame (t + jj) serves the
+   rows whose moment lies within one frame of it, weighted by the seam blend */
+function sampleFrame(ctx, s, f, jj, a, bo, ut) {
+  const { track, gain, soft, bu, rows, r0, sc, acc, wacc } = ctx;
   const data = s.data, sw = s.w, sh = s.h, sx = s.sx, sy = s.sy;
+  const sigma = track.sigma;
   const xstep = sw > 1 ? 4 : 0;
   const rowStride = sw * 4;
   const step = sy / sc;
   const taps = step > 1.5 ? Math.min(4, Math.round(step)) : 1;
-  const wt = w / taps;
-  const base = (s.M + corrT) * sy;
-  const kx = k * sx, cx = s.cx - 0.5;
-  let x0 = 0, fx = 0, lastV = NaN;
+  const base = (s.M + track.corr[f]) * sy;
+  const cx = s.cx - 0.5;
+  const gr = gain ? gain[f * 3] : 1, gg = gain ? gain[f * 3 + 1] : 1, gb = gain ? gain[f * 3 + 2] : 1;
   for (let i = 0; i < rows; i++) {
+    const d = a - rowS[i];
+    const jf = Math.floor(d);
+    if (jf !== jj && jf !== jj - 1) continue;
+    const fr = d - jf;
+    const wB = soft < 0.01 ? (fr < 0.5 ? 0 : 1) : clamp((fr - 0.5) / soft + 0.5, 0, 1);
+    const w = jf === jj ? 1 - wB : wB;
+    if (w <= 0) continue;
+    const off = d - jj;
     const v = bu ? bu[bo + rowB[i]] * (1 - rowF[i]) + bu[bo + rowB[i] + 1] * rowF[i] : ut;
-    if (v !== lastV) {
-      lastV = v;
-      const xs = cx + kx * v;
-      if (sw < 2 || xs <= 0) { x0 = 0; fx = 0; }
-      else if (xs >= sw - 1) { x0 = sw - 2; fx = 1; }
-      else { x0 = Math.floor(xs); fx = xs - x0; }
-    }
+    const xs = cx + sigma * off * v * sx;
+    let x0, fx;
+    if (sw < 2 || xs <= 0) { x0 = 0; fx = 0; }
+    else if (xs >= sw - 1) { x0 = sw - 2; fx = 1; }
+    else { x0 = Math.floor(xs); fx = xs - x0; }
     const yc = ((r0 + i + 0.5) / sc) * sy + base - 0.5;
     let r = 0, g = 0, b = 0;
     for (let q = 0; q < taps; q++) {
@@ -742,11 +830,42 @@ function sampleInto(acc, s, k, bu, bo, ut, corrT, w, rows, r0, sc) {
       g += data[i00 + 1] * w00 + data[i00 + 1 + xstep] * w01 + data[i10 + 1] * w10 + data[i10 + 1 + xstep] * w11;
       b += data[i00 + 2] * w00 + data[i00 + 2 + xstep] * w01 + data[i10 + 2] * w10 + data[i10 + 2 + xstep] * w11;
     }
-    acc[i * 3] += r * wt;
-    acc[i * 3 + 1] += g * wt;
-    acc[i * 3 + 2] += b * wt;
+    const wt = w / taps;
+    acc[i * 3] += r * wt * gr;
+    acc[i * 3 + 1] += g * wt * gg;
+    acc[i * 3 + 2] += b * wt * gb;
+    wacc[i] += w;
   }
-  return true;
+}
+
+/* How well vertical edges line up in a rendered window: the horizontal
+   gradient summed down each column, squared, against the total gradient
+   energy. Upright edges add up, leaning ones smear out. Used to find the
+   rolling-shutter skew. */
+function edgeCoherence(track, dev, getStrip, sc, windows, rows) {
+  let num = 0, den = 0;
+  for (const [c0, c1] of windows) {
+    const w = c1 - c0;
+    if (w < 8) continue;
+    const buf = new Uint8ClampedArray(w * rows * 4);
+    renderCols(track, dev, getStrip, { c0, c1, r0: 0, r1: rows, sc, buf, bw: w, xMap: (c) => c - c0 });
+    const col = new Float64Array(w - 1);
+    for (let y = 0; y < rows; y++) {
+      const ri = y * w * 4;
+      let prev = buf[ri] + 2 * buf[ri + 1] + buf[ri + 2];
+      for (let x = 1; x < w; x++) {
+        const k = ri + x * 4;
+        if (buf[k + 3] === 0 || buf[k - 1] === 0) { prev = buf[k] + 2 * buf[k + 1] + buf[k + 2]; continue; }
+        const L = buf[k] + 2 * buf[k + 1] + buf[k + 2];
+        const gx = L - prev;
+        prev = L;
+        col[x - 1] += gx;
+        den += gx * gx;
+      }
+    }
+    for (let x = 0; x < w - 1; x++) num += col[x] * col[x];
+  }
+  return den > 0 ? num / den : 0;
 }
 
 /* ------------------------------------------------------------------ PNG
@@ -841,7 +960,7 @@ async function writePNG(width, height, bandRows, rowsProvider, onProgress, isCan
 
 const api = {
   NB, CONF_MIN, clamp, Analyzer, computeTrack, detectDirection, findFrame, framesForCols,
-  renderCols, refineMotion, weightedPercentile, layerPick, gaussSmooth, writePNG, crc32,
+  renderCols, edgeCoherence, refineMotion, weightedPercentile, layerPick, gaussSmooth, writePNG, crc32,
 };
 root.FBEngine = api;
 if (typeof module !== 'undefined') module.exports = api;

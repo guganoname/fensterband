@@ -13,7 +13,7 @@ const IN_VIEWER = !!(window.claude && typeof window.claude.use === 'function');
 const MUXER_URL = window.__FB_MUXER_URL || 'https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.js';
 
 /* ------------------------------------------------------------ settings */
-const DEV0 = { depth: 0.5, lockBand: -1, smooth: 12, stabilize: 0.85, seams: 0.5, stretch: 1, source: 'motion', fixed: 12, trimIn: 0, trimOut: 1, direction: 'auto', layers: 'smooth' };
+const DEV0 = { depth: 0.5, lockBand: -1, smooth: 12, stabilize: 0.85, seams: 0.5, stretch: 1, source: 'motion', fixed: 12, trimIn: 0, trimOut: 1, direction: 'auto', layers: 'smooth', skew: 0, skewAuto: true, exposure: 'even' };
 const SRC0 = { slit: 0.5, cropTop: 0.08, cropBot: 0.92, level: 0, outH: 1080, gps: false, keep: true };
 const EX0 = { scale: 1, style: 'sweep', frame: '1920x1080', pace: 'real', len: 20, fps: 30, line: true };
 const prefs = {
@@ -183,7 +183,7 @@ class StripStore {
   constructor(budget) {
     this.meta = []; this.full = []; this.blob = []; this.proxy = [];
     this.lru = new Map(); this.raw = 0; this.blobBytes = 0; this.budget = budget;
-    this.q = []; this.encoding = false; this.inflight = 0; this.dead = false; this.protect = [-1, -1];
+    this.q = []; this.encoding = false; this.inflight = 0; this.dead = false; this.pins = new Map(); this.pinSeq = 0;
     this.getFull = (t) => { const m = this.meta[t]; return m && m.ref ? m.ref : null; };
     this.getProxy = (t) => this.proxy[t] || null;
   }
@@ -214,19 +214,24 @@ class StripStore {
     }
     this.encoding = this.inflight > 0;
   }
+  pinned(t) { for (const [a, b] of this.pins.values()) if (t >= a && t <= b) return true; return false; }
+  release(pin) { this.pins.delete(pin); }
   _evict() {
     if (this.raw <= this.budget) return;
-    const [pa, pb] = this.protect;
     for (const t of this.lru.keys()) {
       if (this.raw <= this.budget * 0.85) break;
-      if (!this.blob[t] || (t >= pa && t <= pb)) continue;
+      if (!this.blob[t] || this.pinned(t)) continue;
       const img = this.full[t];
       if (img) { this.raw -= img.data.length; this.full[t] = null; this.meta[t].ref = null; }
       this.lru.delete(t);
     }
   }
+  /* decodes frames ta..tb and keeps them in memory until release(pin):
+     renders running side by side (view tiles, an export) can't evict
+     each other's frames */
   async ensure(ta, tb) {
-    this.protect = [ta, tb];
+    const pin = ++this.pinSeq;
+    this.pins.set(pin, [ta, tb]);
     const need = [];
     for (let t = ta; t <= tb; t++) {
       if (this.full[t]) { this.lru.delete(t); this.lru.set(t, 1); continue; }
@@ -247,7 +252,7 @@ class StripStore {
     };
     await Promise.all([worker(), worker(), worker(), worker()]);
     this._evict();
-    this.protect = [-1, -1];
+    return pin;
   }
 }
 
@@ -347,7 +352,7 @@ class Capture {
     const prevF = sess.frames[idx - 1];
     if (this.prevStrip && prevF && prevF.bands) {
       const m = E.refineMotion(this.prevStrip, curRef, prevF.bands, g.OH, g.M, g.kOut);
-      prevF.dyF = m.dy; prevF.dxF = m.dx;
+      prevF.dyF = m.dy; prevF.dxF = m.dx; prevF.dg = m.dg;
     }
     this.prevStrip = curRef;
     sess.frames.push({ t: p.t, gps: p.gps, bands: bcopy, dyF: NaN });
@@ -418,19 +423,22 @@ async function renderTile(e) {
   const ca = c0 + e.valid;
   if (ca >= cEnd) return;
   const proxy = tier <= proxyTier() * 1.001;
+  let pin = 0;
   if (!proxy) {
     const [ta, tb] = E.framesForCols(tr, dev, ca, cEnd, tier);
-    await sess.store.ensure(ta, tb);
-    if (S.version !== ver || S.sess !== sess) { e.ver = -1; e.valid = 0; return; }
+    pin = await sess.store.ensure(ta, tb);
+    if (S.version !== ver || S.sess !== sess) { sess.store.release(pin); e.ver = -1; e.valid = 0; return; }
     tr = S.track;
   }
   const w = cEnd - ca;
   const img = new ImageData(w, e.h);
   const mirror = tr.sigma < 0;
-  E.renderCols(tr, dev, proxy ? sess.store.getProxy : sess.store.getFull, {
-    c0: ca, c1: cEnd, r0: 0, r1: e.h, sc: tier, buf: img.data, bw: w,
-    xMap: mirror ? (cc) => cEnd - 1 - cc : (cc) => cc - ca,
-  });
+  try {
+    E.renderCols(tr, dev, proxy ? sess.store.getProxy : sess.store.getFull, {
+      c0: ca, c1: cEnd, r0: 0, r1: e.h, sc: tier, buf: img.data, bw: w,
+      xMap: mirror ? (cc) => cEnd - 1 - cc : (cc) => cc - ca,
+    });
+  } finally { if (pin) sess.store.release(pin); }
   e.ctx.putImageData(img, mirror ? c0 + TILE - cEnd : ca - c0, 0);
   e.valid = cEnd - c0;
 }
@@ -524,6 +532,69 @@ function finishRecording(msg) {
   updateScanUI();
   updateExportAvail();
   if (msg && sess && sess.frames.length >= 3) toast(msg);
+  if (S.dev.skewAuto && sess && sess.frames.length > 20) autoSkew(true);
+}
+
+/* Measures rolling-shutter skew on the finished strip: renders a few windows
+   at overview size with candidate skews and keeps the one whose vertical
+   edges line up best. */
+let skewJob = 0;
+async function autoSkew(quiet) {
+  const sess = S.sess, tr0 = S.track;
+  if (!sess || !tr0 || tr0.L < 50) return;
+  const job = ++skewJob;
+  const pt = proxyTier();
+  const rows = Math.max(16, Math.round(sess.geom.OH * pt));
+  const dev0 = Object.assign({}, S.dev);
+  const WT = Math.floor(tr0.L * dev0.stretch * pt);
+  const ww = Math.min(200, Math.max(48, Math.floor(WT / 14)));
+  const windows = [];
+  const count = Math.min(14, Math.max(1, Math.floor(WT / (ww * 1.5))));
+  for (let k = 0; k < count; k++) {
+    const c0 = Math.floor((k + 0.5) * WT / count - ww / 2);
+    if (c0 < 0 || c0 + ww > WT) continue;
+    // skip windows where the vehicle stood still: nothing leans there
+    const t = E.findFrame(tr0.P, tr0.fi, tr0.fo, tr0.P[tr0.fi] + (c0 + ww / 2) / (pt * dev0.stretch));
+    if (tr0.u[t] < 2) continue;
+    windows.push([c0, c0 + ww]);
+  }
+  if (windows.length < 2) return;
+  const score = (k) => E.edgeCoherence(tr0, Object.assign({}, dev0, { skew: k }), sess.store.getProxy, pt, windows, rows);
+  if (!quiet) setBusy('Measuring shutter skew', 0);
+  const memo = new Map();
+  const get = async (k) => {
+    k = Math.round(k * 1000) / 1000;
+    if (!memo.has(k)) { memo.set(k, score(k)); await nextFrame(); }
+    return memo.get(k);
+  };
+  let best = 0, bestS = -1;
+  const coarse = [];
+  for (let k = -1.2; k <= 1.2001; k += 0.1) coarse.push(k);
+  for (let i = 0; i < coarse.length; i++) {
+    if (job !== skewJob || S.sess !== sess) return;
+    const v = await get(coarse[i]);
+    if (v > bestS) { bestS = v; best = coarse[i]; }
+    if (!quiet) setBusy('Measuring shutter skew', (i + 1) / (coarse.length + 11));
+  }
+  for (let k = best - 0.1; k <= best + 0.1001; k += 0.02) {
+    if (job !== skewJob || S.sess !== sess) return;
+    const v = await get(k);
+    if (v > bestS) { bestS = v; best = k; }
+  }
+  const a = await get(best - 0.02), c = await get(best + 0.02), den = a - 2 * bestS + c;
+  if (den < 0) best += clamp(0.01 * (a - c) / den, -0.02, 0.02);
+  const s0 = await get(0);
+  if (job !== skewJob || S.sess !== sess) return;
+  setBusy(null);
+  const gain = s0 > 0 ? bestS / s0 : 1;
+  const k = gain >= 1.03 ? Math.round(best * 100) / 100 : 0;
+  S.lastSkew = { k, gain };
+  if (S.dev.skewAuto) {
+    S.dev.skew = k;
+    syncDevUI();
+    devChanged();
+  }
+  if (!quiet) toast(k ? `Shutter skew ${k.toFixed(2)}: vertical edges straightened` : 'No shutter skew found in this take');
 }
 
 /* ------------------------------------------------------------- sources */
@@ -886,7 +957,7 @@ function setMode(m) {
     S.demoT0 = performance.now(); S.demoFi = -1;
   } else if (m === 'live') {
     setSource(null);
-    monNote(`<strong>Live camera</strong><p>Hold the phone flat against the glass, rear camera facing out. Landscape gives the tallest strip. Lock exposure if your camera allows it.</p><div class="row"><button type="button" class="btn primary" data-act="cam">Start camera</button></div>`);
+    monNote(`<strong>Live camera</strong><p>Hold the phone flat against the glass, rear camera facing out. Upright gives the tallest strip and the straightest verticals.</p><div class="row"><button type="button" class="btn primary" data-act="cam">Start camera</button></div>`);
   } else if (m === 'clip') {
     if (S.clip && S.clip.ready) {
       setSource({ kind: 'clip', el: vidClip(), w: vidClip().videoWidth, h: vidClip().videoHeight, label: S.clip.name });
@@ -1658,7 +1729,7 @@ function bindGraph() {
 
 /* ---------------------------------------------------------- develop UI */
 function paintRange(el) { const p = (el.value - el.min) / (el.max - el.min) * 100; el.style.setProperty('--p', p + '%'); }
-const DEV_PERSIST = ['depth', 'smooth', 'stabilize', 'seams', 'stretch', 'source', 'fixed', 'direction', 'layers'];
+const DEV_PERSIST = ['depth', 'smooth', 'stabilize', 'seams', 'stretch', 'source', 'fixed', 'direction', 'layers', 'skew', 'skewAuto', 'exposure'];
 let devQueued = false;
 function devChanged(persist = true) {
   if (persist) { const o = {}; for (const k of DEV_PERSIST) o[k] = S.dev[k]; prefs.set('dev', o); }
@@ -1691,6 +1762,8 @@ function syncDevUI() {
   syncSeg('segSource', S.dev.source);
   syncSeg('segDir', S.dev.direction);
   syncSeg('segLayers', S.dev.layers);
+  syncSeg('segExposure', S.dev.exposure);
+  syncSkewAuto();
   $('ctlFixed').hidden = S.dev.source !== 'fixed';
   const locked = S.dev.lockBand >= 0;
   $('lockChip').hidden = !locked;
@@ -1699,6 +1772,10 @@ function syncDevUI() {
   if (locked) $('lockText').textContent = `Locked to band ${S.dev.lockBand + 1} of ${NB}`;
   const gpsBtn = $('segSource').querySelector('[data-v="gps"]');
   gpsBtn.disabled = !(S.sess && S.sess.gpsAny);
+}
+function syncSkewAuto() {
+  $('btnSkewAuto').setAttribute('aria-pressed', String(!!S.dev.skewAuto));
+  $('oSkew').textContent = S.dev.skewAuto ? `auto ${(S.dev.skew || 0).toFixed(2)}` : (S.dev.skew || 0).toFixed(2);
 }
 function bindDevelop() {
   bindRange('cDepth', 'oDepth', () => S.dev.depth, (v) => { S.dev.depth = v; }, (v) => `${depthWord(v)} · ${v.toFixed(2)}`);
@@ -1715,11 +1792,16 @@ function bindDevelop() {
     devChanged();
   });
   bindSeg('segLayers', () => S.dev.layers, (v) => { S.dev.layers = v; devChanged(); });
+  bindSeg('segExposure', () => S.dev.exposure, (v) => { S.dev.exposure = v; devChanged(); });
+  bindRange('cSkew', 'oSkew', () => S.dev.skew, (v) => { S.dev.skew = v; S.dev.skewAuto = false; syncSkewAuto(); }, (v) => (S.dev.skewAuto ? `auto ${v.toFixed(2)}` : v.toFixed(2)));
+  $('cSkew').addEventListener('dblclick', () => { S.dev.skew = 0; S.dev.skewAuto = false; syncDevUI(); devChanged(); });
+  $('btnSkewAuto').addEventListener('click', () => { S.dev.skewAuto = true; syncDevUI(); devChanged(); autoSkew(false); });
   $('btnUnlock').addEventListener('click', () => { S.dev.lockBand = -1; syncDevUI(); devChanged(); });
   $('btnReset').addEventListener('click', () => {
     const keep = { trimIn: S.dev.trimIn, trimOut: S.dev.trimOut };
     S.dev = Object.assign({}, DEV0, keep);
     syncDevUI(); devChanged();
+    autoSkew(true);
   });
   syncDevUI();
 }
@@ -1897,7 +1979,7 @@ function offerSave(file) {
 }
 
 async function exportPNG() {
-  const tr = S.track, dev = S.dev, sess = S.sess;
+  const tr = S.track, dev = Object.assign({}, S.dev), sess = S.sess;
   if (!tr || !sess) return;
   const sc = S.ex.scale;
   const H = Math.max(2, Math.round(sess.geom.OH * sc));
@@ -1913,8 +1995,9 @@ async function exportPNG() {
       if (job.cancelled) throw new Error('cancelled');
       const cb = Math.min(WT, ca + CH);
       const [ta, tb] = E.framesForCols(tr, dev, ca, cb, sc);
-      await sess.store.ensure(ta, tb);
-      E.renderCols(tr, dev, sess.store.getFull, { c0: ca, c1: cb, r0: y0, r1: y1, sc, buf, bw: WT, xMap: mirror ? (c) => WT - 1 - c : (c) => c });
+      const pin = await sess.store.ensure(ta, tb);
+      try { E.renderCols(tr, dev, sess.store.getFull, { c0: ca, c1: cb, r0: y0, r1: y1, sc, buf, bw: WT, xMap: mirror ? (c) => WT - 1 - c : (c) => c }); }
+      finally { sess.store.release(pin); }
       job.progress((y0 + n * cb / WT) / H, `Rendering image · ${Math.round((y0 + n * cb / WT) / H * 100)} %`);
       await sleep(0);
     }
@@ -1948,13 +2031,13 @@ function exportCSV() {
   const F = sess.frames, kOut = sess.geom.kOut, sg = tr.sigma;
   const head = ['frame', 'time_s', 'strip_px', 'kept'];
   for (let b = 1; b <= NB; b++) head.push(`band${b}_px`, `band${b}_conf`);
-  head.push('gps_kmh');
+  head.push('gps_kmh', 'gain_r', 'gain_g', 'gain_b');
   const lines = [head.join(',')];
   for (let j = 0; j < F.length; j++) {
     const row = [j, F[j].t.toFixed(4), tr.u[j].toFixed(3), j >= tr.fi && j <= tr.fo ? 1 : 0];
     const b = F[j].bands;
     for (let i = 0; i < NB; i++) row.push(b ? (-sg * b[i * 3] * kOut).toFixed(2) : '', b ? b[i * 3 + 2].toFixed(3) : '');
-    row.push(Number.isFinite(F[j].gps) ? (F[j].gps * 3.6).toFixed(1) : '');
+    row.push(Number.isFinite(F[j].gps) ? (F[j].gps * 3.6).toFixed(1) : '', tr.gain[j * 3].toFixed(4), tr.gain[j * 3 + 1].toFixed(4), tr.gain[j * 3 + 2].toFixed(4));
     lines.push(row.join(','));
   }
   saveBlob(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }), `fensterband-motion-${stamp()}.csv`);
@@ -2301,6 +2384,6 @@ async function init() {
   if (!window.__fbNoAutoDemo) fastDemoScan();
 }
 
-window.__fb = { S, E, gps, toggleScan, setMode, loadClip, exportPNG, exportVideo, exportCSV, zoomTo, centerOnFrame, retrack, fastDemoScan, openExport, closeExport };
+window.__fb = { S, E, gps, autoSkew, toggleScan, setMode, loadClip, exportPNG, exportVideo, exportCSV, zoomTo, centerOnFrame, retrack, fastDemoScan, openExport, closeExport };
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

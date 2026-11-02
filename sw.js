@@ -1,5 +1,5 @@
 /* Fensterband offline cache: the app keeps working on a train without signal. */
-const CACHE = 'fensterband-58340a9554';
+const CACHE = 'fensterband-2d8341d839';
 const ASSETS = ["./", "index.html", "manifest.webmanifest", "vendor/mp4-muxer.js", "icons/apple-touch-icon.png", "icons/favicon-64.png", "icons/icon-192.png", "icons/icon-512.png", "icons/icon-maskable-512.png", "fonts/big-shoulders-display-latin-600-normal.woff2", "fonts/big-shoulders-display-latin-800-normal.woff2", "fonts/overpass-latin-400-normal.woff2", "fonts/overpass-latin-600-normal.woff2", "fonts/overpass-latin-700-normal.woff2", "fonts/overpass-mono-latin-400-normal.woff2", "fonts/overpass-mono-latin-600-normal.woff2"];
 
 self.addEventListener('install', (e) => {

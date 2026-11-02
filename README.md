@@ -9,6 +9,8 @@ A slit-scan camera for train windows. It watches the landscape slide past and bu
 1. Open the link above in Safari.
 2. Share → **Add to Home Screen**.
 
+Hold the phone upright against the window: that gives the tallest strip, and the camera's row-by-row readout then runs along the strip instead of across it.
+
 It then runs full screen with its own icon and works offline, which matters on a train. Camera and location access are asked for on the first scan. Exports open the share sheet: **Save Video** / **Save Image** puts them in Photos.
 
 ## What it does
@@ -29,6 +31,8 @@ Because every frame's slit strip is kept, the strip can be re-developed after sc
 | Smoothing | how steady the scanning speed is |
 | Steady | vertical shake removal |
 | Seam blend | hard cuts or crossfades between frames |
+| Skew | rolling-shutter correction: phone sensors read the picture row by row, which tilts vertical edges in a slit-scan. Measured automatically after every scan |
+| Exposure | *Even* removes brightness and colour jumps from the camera's auto exposure; *As shot* keeps them |
 | Trim | drag the end bars in the motion graph |
 
 Exports: one continuous PNG at full resolution (any width), a scan video as MP4 (sweep, scroll or pan; 16:9, 1:1, 4:5, 9:16), and a CSV of every frame's motion.

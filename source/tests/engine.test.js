@@ -182,3 +182,70 @@ function sampleTex(tex, tw, th, x, y) {
   assert(Math.max(...errsX) < 0.15, `refined band motion within 0.15 px (max err ${Math.max(...errsX).toFixed(3)})`);
   assert(Math.abs(r.dy - dy) < 0.15, `refined vertical shift ${r.dy.toFixed(3)} vs ${dy}`);
 }
+
+// ---------- rolling shutter: rows captured later are corrected by dev.skew
+{
+  const OH = 96, M = 4, TW = 4000, TH = OH + 20;
+  const tex = makeTexture(TW, TH, 5);
+  { const r = rng(9); for (let k = 0; k < 160; k++) { const x0 = Math.floor(r() * (TW - 8)), w = 2 + Math.floor(r() * 5), val = r() < 0.5 ? 20 : 235;
+      for (let y = 0; y < TH; y++) for (let x = x0; x < x0 + w; x++) tex[y * TW + x] = val; } }
+  const n = 50, v = 9.0, capW = 300, slit = 150, rho = 0.7;
+  const strips = [], frames = [];
+  for (let t = 0; t < n; t++) {
+    const data = new Uint8ClampedArray(capW * (OH + 2 * M) * 4);
+    for (let y = 0; y < OH + 2 * M; y++) {
+      const ts = t + rho * ((y - M + 0.5) / OH - 0.5);   // this row was read out later
+      for (let x = 0; x < capW; x++) {
+        const val = sampleTex(tex, TW, TH, x + v * ts, y + 4);
+        const i = (y * capW + x) * 4; data[i] = data[i + 1] = data[i + 2] = val; data[i + 3] = 255;
+      }
+    }
+    strips.push({ data, w: capW, h: OH + 2 * M, cx: slit, M, sx: 1, sy: 1 });
+    const bands = new Float32Array(18);
+    for (let b = 0; b < 6; b++) { bands[b * 3] = -v / 2; bands[b * 3 + 2] = 1; }
+    frames.push({ t: t / 30, bands, gps: NaN });
+  }
+  const sess = { frames, geom: { kOut: 2, M, OH, cropTop: 0, cropBot: 1 } };
+  const base = { depth: 0.5, lockBand: -1, smooth: 0, stabilize: 0, seams: 0.5, stretch: 1, source: 'motion', fixed: 10, trimIn: 0, trimOut: 1, direction: 'auto', layers: 'strips' };
+  const tr = E.computeTrack(sess, base);
+  const err = (skew) => {
+    const dev = Object.assign({}, base, { skew });
+    const Wt = Math.floor(tr.L) - 20, buf = new Uint8ClampedArray(Wt * OH * 4);
+    E.renderCols(tr, dev, (i) => strips[i], { c0: 0, c1: Wt, r0: 0, r1: OH, sc: 1, buf, bw: Wt, xMap: (c) => c });
+    let e = 0, k = 0;
+    for (let c = 20; c < Wt; c += 3) for (let y = 0; y < OH; y += 2) { e += Math.abs(buf[(y * Wt + c) * 4] - sampleTex(tex, TW, TH, slit + c, y + 4 + M)); k++; }
+    return e / k;
+  };
+  const e0 = err(0), e1 = err(rho);
+  assert(e0 > 4 * e1, `skew correction restores the scene (err ${e0.toFixed(2)} uncorrected, ${e1.toFixed(2)} corrected)`);
+  const windows = [[20, 260], [300, 420]];
+  const sc = (k) => E.edgeCoherence(tr, Object.assign({}, base, { skew: k }), (i) => strips[i], 1, windows, OH);
+  const cands = [-0.35, 0, 0.35, 0.7, 1.05];
+  const best = cands.reduce((b, k) => (sc(k) > sc(b) ? k : b), cands[0]);
+  assert(best === 0.7, `edge coherence peaks at the true skew (${best})`);
+}
+
+// ---------- exposure: a camera gain step is measured and evened out
+{
+  const OH = 300, M = 18, H = OH + 2 * M, TW = 2000, TH = 600;
+  const tex = makeTexture(TW, TH, 21);
+  const mk = (cx, off, gain) => {
+    const w = 120, data = new Uint8ClampedArray(w * H * 4);
+    for (let y = 0; y < H; y++) for (let x = 0; x < w; x++) {
+      const v = 40 + 0.6 * sampleTex(tex, TW, TH, x - cx + 700 - off, y + 100);
+      const i = (y * w + x) * 4; data[i] = v * gain; data[i + 1] = v * gain * 0.98; data[i + 2] = v * gain * 1.03; data[i + 3] = 255;
+    }
+    return { data, w, h: H, cx };
+  };
+  const bands = new Float32Array(18);
+  for (let b = 0; b < 6; b++) { bands[b * 3] = -6 / 4; bands[b * 3 + 2] = 1; }
+  for (const gk of [1.03, 1.08]) {
+    const r = E.refineMotion(mk(60, 0, 1), mk(60, -6, gk), bands, OH, M, 4);
+    assert(r.dg && Math.abs(r.dg[0] - Math.log(gk)) < 0.01 && Math.abs(r.dx[2] + 6) < 0.15, `exposure change measured (${r.dg ? Math.exp(r.dg[0]).toFixed(3) : 'none'} vs ${gk}), motion still ${r.dx[2].toFixed(2)}`);
+  }
+  const fr = [];
+  for (let t = 0; t < 400; t++) fr.push({ t: t / 30, bands, gps: NaN, dg: t === 199 ? new Float32Array([0.2, 0.2, 0.2]) : new Float32Array(3) });
+  const tr = E.computeTrack({ frames: fr, geom: { kOut: 4, M, OH } }, { depth: 0.5, lockBand: -1, smooth: 0, stabilize: 0, seams: 0.5, stretch: 1, source: 'motion', fixed: 10, trimIn: 0, trimOut: 1, direction: 'auto' });
+  const before = tr.gain[198 * 3], after = tr.gain[200 * 3];
+  assert(Math.abs(Math.log(after / before) + 0.2) < 0.01, `step evened out across the change (gain ${before.toFixed(3)} → ${after.toFixed(3)})`);
+}
